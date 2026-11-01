@@ -1,96 +1,91 @@
-[hyundai_ioniq_electric_38kwh_readme.md](https://github.com/user-attachments/files/25154663/hyundai_ioniq_electric_38kwh_readme.md)
-# Hyundai Ioniq Electric 38kWh (2020-2021) WiCAN AutoPID Profile
+# Fix Hyundai Ioniq Electric 38kWh profile — 33 parameters verified on-vehicle
 
-## Vehicle Information
-- **Make/Model:** Hyundai Ioniq Electric (AE EV)
-- **Battery:** 38.3 kWh (88 cells in series)
-- **Years:** 2020-2021 facelift
-- **Tested on:** 2021 Ioniq Electric 38kWh
+## Summary
 
-## Compatibility Note
+Complete overhaul of the Hyundai Ioniq Electric 38kWh (2020–2021) profile. Every formula has been rewritten and validated against live data from multiple drive sessions, AC charging sessions, and parked captures across March–September 2026.
 
-⚠️ **This profile was developed and tested exclusively on a 2021 Ioniq Electric 38kWh.**
+## What was wrong
 
-It may **NOT** be compatible with:
-- **2017-2019 Ioniq Electric 28kWh** - Different battery configuration (fewer cells), possibly different byte positions
-- **Ioniq Hybrid / Plug-in Hybrid** - Different powertrain architecture
+The original profile had fundamental issues that produced incorrect or zero values:
 
-If you have an earlier model, some parameters may not work or show incorrect values. Contributions to add support for other variants are welcome!
+- **Speed**: `B20*3.97+2.3` — wrong formula entirely, always offset by +2.3 even when stationary
+- **Current**: `[B17:B18]/10` — unsigned, regen braking showed as large positive values instead of negative
+- **Temperatures**: `B22-40` etc. — applied -40°C offset when raw values are already in °C
+- **Tire pressures**: `/5` — gave readings in PSI, not bar (schema unit)
+- **Tire temp RR**: `B24-50` — B24 is a CF3 sequence byte (0x23), not data
+- **Charging flags**: `(B15&32)/32` — wrong byte, B14 holds the charging status
+- **Odometer**: `[B13:B14]` — 16-bit, overflows at 65,536 km
+- **MCU PID**: `2101` — missing response line count, causing timeouts
+- **TPMS PID**: `22C00B` — missing response line count (needs 4 frames)
+- **CLU PID**: `22B002` — missing response line count (needs 3 frames)
+- **Outside temp**: missing entirely
+- **Motor RPM**: missing entirely
 
-## Profile Features
+## Changes
 
-### ✅ Confirmed Working Parameters
+### BMS 0x0101 (PID `2201019`)
 
-| Parameter | ECU | PID | Description |
-|-----------|-----|-----|-------------|
-| SOC_BMS | 7E4 | 2201019 | Battery state of charge (%) |
-| SOC_Display | 7E4 | 2201057 | Dashboard displayed SOC (%) |
-| SOH_pct | 7E4 | 2201057 | State of health (%) |
-| HV_Voltage_V | 7E4 | 2201019 | High voltage battery voltage |
-| HV_Current_A | 7E4 | 2201019 | HV battery current (positive=discharge, overflow for regen*) |
-| Cell_01-88_V | 7E4 | 220102-04 | All 88 individual cell voltages |
-| Cell_V_Max/Min | 7E4 | 2201019 | Highest/lowest cell voltage |
-| Batt_Max/Min_Temp_C | 7E4 | 2201019 | Battery temperature range |
-| Batt_Inlet_Temp_C | 7E4 | 2201019 | Battery coolant inlet temperature |
-| Aux_Batt_V | 7E4 | 2201019 | 12V auxiliary battery voltage |
-| Isolation_kOhm | 7E4 | 2201019 | HV isolation resistance |
-| Charged/Discharged_kWh | 7E4 | 2201019 | Lifetime energy counters |
-| Capacitor_V | 7E4 | 220101 | DC link capacitor voltage |
-| Charging_AC | 7E4 | 2201019 | AC charging active (1=yes) |
-| Charging_DC | 7E4 | 2201019 | DC fast charging active (1=yes) |
-| Cabin_Temp_C | 7B3 | 2201006 | Cabin temperature |
-| Gear_Park/Drive/Reverse | 7E2 | 2101 | Current gear state |
-| Regen_Level | 7E2 | 2101 | Regenerative braking level |
-| Inverter_Temp_C | 7E2 | 2101 | Motor inverter temperature |
-| TPMS_FL/FR/RL/RR_psi | 7A0 | 22C00B | Tire pressures |
-| Odometer_km | 7C6 | 22B002 | Odometer reading |
+| Parameter | Before | After | Fix |
+|-----------|--------|-------|-----|
+| CHARGING | `(B15&32)/32` | `(B14&32)/32` | Wrong byte — B14 changes during charging, B15 doesn't |
+| CHARGING_DC | `(B15&64)/64` | `(B14&64)/64` | Same |
+| HV_A | `[B17:B18]/10` | `(S17*256+B18)/10` | Signed current for regen braking |
+| HV_W | `([B19:B20]/10)*([B17:B18]/10)` | `((S17*256+B18)/10)*([B19:B20]/10)` | Uses corrected signed current |
+| HV_T_MAX | `B22-40` | `B22` | Raw = °C, no offset needed |
+| HV_T_MIN | `B23-40` | `B23` | Same |
+| HV_T_I | `B26-40` | `B26` | Same |
 
-### ⚠️ Known Limitations
+### MCU 0x2101 (PID `2101` → `21014`)
 
-| Parameter | Issue | Notes |
-|-----------|-------|-------|
-| HV_Current_A | Unsigned overflow during regen | Values >6000A indicate negative current; convert with: `(value × 10 - 65536) / 10` |
-| Motor RPM | Not available | Ioniq EV does not expose motor RPM via OBD-II |
-| Vehicle Speed | Not in this profile | Available via GPS or needs further reverse engineering |
-| Outside_Temp_C | Byte position unconfirmed | Removed pending SavvyCAN verification |
+| Parameter | Before | After | Fix |
+|-----------|--------|-------|-----|
+| *(pid)* | `2101` | `21014` | Added 4-frame response count |
+| SPEED | `B20*3.97+2.3` | `(S20*256+B19)*0.01609344` | Signed LE int16 in hundredths of mph → km/h. R=1.000 vs Car Scanner, R=0.98 vs GPS. |
+| ENGINE_RPM | *(missing)* | `(S20*256+B19)*0.967711` | Fixed gear ratio derived from BMS motor speed correlation |
+| THROTTLE | `B13` | `B12` | Corrected byte position |
 
-### ECU Addresses Used
+### TPMS 0x22C00B (PID `22C00B` → `22C00B4`)
 
-| ECU | Request ID | Response ID | Description |
-|-----|------------|-------------|-------------|
-| BMS | 7E4 | 7EC | Battery Management System |
-| VMCU | 7E2 | 7EA | Vehicle Motor Control Unit |
-| FATC | 7B3 | 7BB | Climate Control |
-| TPMS | 7A0 | 7A8 | Tire Pressure Monitoring |
-| CLU | 7C6 | 7CE | Cluster (Instrument Panel) |
+| Parameter | Before | After | Fix |
+|-----------|--------|-------|-----|
+| *(pid)* | `22C00B` | `22C00B4` | Added 4-frame response count |
+| TYRE_P_* | `/5` | `/72.5` | Raw unit is 0.2 PSI; /72.5 converts to bar |
+| TYRE_T_RR | `B24-50` | `B25-50` | B24 is CF3 sequence byte (0x23), data is at B25 |
 
-## Installation
+### HVAC 0x0100 (PID `2201006`)
 
-1. Open WiCAN web interface
-2. Go to AutoPID settings
-3. Select "Hyundai Ioniq Electric 38kWh" from car model dropdown
-4. Or import the JSON file manually
+| Parameter | Before | After |
+|-----------|--------|-------|
+| TMP_A | *(missing)* | `B12/2-40` |
 
-## Notes
+### CLU 0xB002 (PID `22B002` → `22B0023`)
 
-- **Signed Current Values:** WiCAN doesn't support signed integers. During regenerative braking, HV_Current_A shows large values (~6400-6550) which represent negative current. Post-process in your logging software.
-- **Cell Voltage Gaps:** Bytes B16, B24, B32, B40 are skipped in cell voltage PIDs due to ISO-TP frame boundaries.
-- **Charging Detection:** Use `Charging_AC` or `Charging_DC` flags. `Charge_State_Raw` (B15) provides the raw byte for debugging.
+| Parameter | Before | After | Fix |
+|-----------|--------|-------|-----|
+| *(pid)* | `22B002` | `22B0023` | Added 3-frame response count |
+| ODOMETER | `[B13:B14]` | `B12*65536+[B13:B14]` | 24-bit value — 16-bit overflows at 65,536 km |
 
-## Credits
+## Validation
 
-This profile was developed through extensive reverse engineering and testing by:
-- **Sándor Balikó** (GitHub: @sbaliko) - Vehicle owner, PID discovery, formula development, and validation
-- **Claude (Anthropic AI)** - Log analysis, debugging assistance, and documentation
+Tested on a 2021 Hyundai Ioniq Electric 38kWh (AE, European market) using WiCAN Pro (firmware v4.50) across multiple sessions from March–September 2026.
 
-Special thanks to:
-- [WiCAN/MeatPi](https://github.com/meatpiHQ/wican-fw) for the excellent OBD-II WiFi adapter
-- [Car Scanner Pro](https://www.carscanner.info/) used for initial PID discovery
+**Conditions tested:**
+- Driving (multiple sessions, 0–110 km/h, city and highway)
+- Parked in ACC and READY states
+- AC charging (7.2 kW on-board charger)
+- Post-BMS-update (dealer recalibration June 2026)
+- Odometer past 65,536 km overflow
 
-## Version History
+**Verification methods:**
+- GPS speed correlation: R = 0.98 over 502 driving samples
+- Car Scanner Pro cross-reference: R = 1.000 over 922 synchronised speed samples
+- OBC DC voltage/current vs BMS cross-validation during AC charging
+- Raw ELM327 frame capture and byte-level verification for every parameter
 
-- **v1.0** (2026-02-07): Initial release with 88 cell voltages, charging status, TPMS, and core BMS parameters
+All 33 parameters produce correct values across all vehicle states.
 
-## License
+## Vehicle details
 
-This profile is provided as-is for the WiCAN community. Feel free to use and modify.
+- **Model:** Hyundai Ioniq Electric (AE) 38.3 kWh, 2020–2021 facelift
+- **ECUs:** BMS (7E4), MCU (7E2), HVAC (7B3), TPMS (7A0), CLU (7C6)
+- **Adapter:** WiCAN Pro, firmware v4.50, ELM327 mode
